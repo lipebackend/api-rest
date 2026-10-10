@@ -64,11 +64,9 @@ public class JedisTaskCache implements TaskCache {
     }
 
     private record CachedTask(String id, String title, boolean completed, Instant createdAt) {
-
         private static CachedTask from(Task task) {
             return new CachedTask(task.getId(), task.getTitle(), task.isCompleted(), task.getCreatedAt());
         }
-
         private Task toTask() {
             return new Task(id, title, completed, createdAt);
         }
