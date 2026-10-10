@@ -130,4 +130,85 @@ class TaskServiceImplTest {
         assertThat(pending).hasSize(1).extracting(Task::getTitle).containsExactly("T1");
         assertThat(completed).hasSize(1).extracting(Task::getTitle).containsExactly("T2");
     }
+
+    @Test
+    @DisplayName("Should throw ValidationException when title exceeds 200 characters")
+    void shouldThrowWhenTitleExceeds200Chars() {
+        String oversized = "x".repeat(Task.MAX_TITLE_LENGTH + 1);
+        assertThatThrownBy(() -> service.createTask(oversized))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining("cannot exceed 200 characters");
+    }
+
+    @Test
+    @DisplayName("Should populate cache on miss, return cached value on hit, and evict on write/delete")
+    void shouldCoordinateCacheAsideAndPublishEvents() {
+        java.util.Map<String, Task> fakeCacheMap = new java.util.HashMap<>();
+        java.util.List<String> publishedEvents = new java.util.ArrayList<>();
+
+        com.taskmanagement.api.domain.contract.cache.TaskCache spyCache =
+                new com.taskmanagement.api.domain.contract.cache.TaskCache() {
+                    @Override
+                    public java.util.Optional<Task> get(String id) {
+                        return java.util.Optional.ofNullable(fakeCacheMap.get(id));
+                    }
+
+                    @Override
+                    public void put(Task task) {
+                        fakeCacheMap.put(task.getId(), task);
+                    }
+
+                    @Override
+                    public void evict(String id) {
+                        fakeCacheMap.remove(id);
+                    }
+                };
+
+        com.taskmanagement.api.domain.contract.queue.TaskQueuePublisher spyPublisher =
+                new com.taskmanagement.api.domain.contract.queue.TaskQueuePublisher() {
+                    @Override
+                    public void publishTaskCreatedEvent(Task task) {
+                        publishedEvents.add("created:" + task.getId());
+                    }
+
+                    @Override
+                    public void publishTaskUpdatedEvent(Task task) {
+                        publishedEvents.add("updated:" + task.getId());
+                    }
+
+                    @Override
+                    public void publishTaskDeletedEvent(String taskId) {
+                        publishedEvents.add("deleted:" + taskId);
+                    }
+                };
+
+        TaskServiceImpl cachedService = new TaskServiceImpl(repository, spyCache, spyPublisher);
+
+        Task created = cachedService.createTask("Cache Test");
+        assertThat(fakeCacheMap).doesNotContainKey(created.getId());
+
+        // First GET -> cache miss -> loads from repo and populates cache
+        Task fetched = cachedService.getTaskById(created.getId());
+        assertThat(fetched.getTitle()).isEqualTo("Cache Test");
+        assertThat(fakeCacheMap).containsKey(created.getId());
+
+        // Update -> evicts cache
+        cachedService.replaceTask(created.getId(), "Updated Title", true);
+        assertThat(fakeCacheMap).doesNotContainKey(created.getId());
+
+        // Second GET -> repopulates cache with updated task
+        Task refetched = cachedService.getTaskById(created.getId());
+        assertThat(refetched.getTitle()).isEqualTo("Updated Title");
+        assertThat(fakeCacheMap).containsKey(created.getId());
+
+        // Delete -> evicts cache
+        cachedService.deleteTask(created.getId());
+        assertThat(fakeCacheMap).doesNotContainKey(created.getId());
+
+        assertThat(publishedEvents).containsExactly(
+                "created:" + created.getId(),
+                "updated:" + created.getId(),
+                "deleted:" + created.getId()
+        );
+    }
 }

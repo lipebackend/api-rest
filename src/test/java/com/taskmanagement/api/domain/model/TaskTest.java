@@ -81,4 +81,17 @@ class TaskTest {
         assertThat(t1.hashCode()).isEqualTo(t2.hashCode());
         assertThat(t1).isNotEqualTo(t3);
     }
+
+    @Test
+    @DisplayName("Should throw IllegalArgumentException when title exceeds 200 characters")
+    void shouldThrowWhenTitleExceedsMaxLength() {
+        String validMaxTitle = "a".repeat(Task.MAX_TITLE_LENGTH);
+        Task validTask = Task.create(validMaxTitle);
+        assertThat(validTask.getTitle()).hasSize(Task.MAX_TITLE_LENGTH);
+
+        String oversizedTitle = "a".repeat(Task.MAX_TITLE_LENGTH + 1);
+        assertThatThrownBy(() -> Task.create(oversizedTitle))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Title cannot exceed 200 characters");
+    }
 }

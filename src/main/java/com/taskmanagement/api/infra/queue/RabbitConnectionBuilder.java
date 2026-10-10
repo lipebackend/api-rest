@@ -5,7 +5,6 @@ import java.util.concurrent.TimeoutException;
 
 import com.rabbitmq.client.Connection;
 import com.rabbitmq.client.ConnectionFactory;
-import com.taskmanagement.api.domain.contract.queue.RabbitConfig;
 
 public class RabbitConnectionBuilder {
     private RabbitConfig config;
