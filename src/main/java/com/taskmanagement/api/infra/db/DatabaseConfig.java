@@ -4,13 +4,12 @@ import javax.sql.DataSource;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 
-public class Databaseconfig {
+public class DatabaseConfig {
     private static HikariDataSource dataSource;
 
-    private Databaseconfig() {}
+    private DatabaseConfig() {}
     
     public static DataSource getDataSource(String url, String username, String password) {
-        
         if (dataSource == null) {
             HikariConfig config = new HikariConfig();
 
