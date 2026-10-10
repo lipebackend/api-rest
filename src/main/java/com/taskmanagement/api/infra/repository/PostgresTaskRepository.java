@@ -1,8 +1,5 @@
 package com.taskmanagement.api.infra.repository;
 
-import com.taskmanagement.api.domain.contract.repository.TaskRepository;
-import com.taskmanagement.api.domain.model.Task;
-
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -16,12 +13,16 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.UnaryOperator;
+
 import javax.sql.DataSource;
+
+import com.taskmanagement.api.domain.contract.repository.TaskRepository;
+import com.taskmanagement.api.domain.model.Task;
 
 public class PostgresTaskRepository implements TaskRepository, AutoCloseable {
     private final BlockingQueue<Task> batchQueue = new LinkedBlockingQueue<>();
-    private DataSource dataSource;
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    private final DataSource dataSource;
 
     public PostgresTaskRepository(DataSource dataSource) {
         this.dataSource = dataSource;
@@ -71,17 +72,23 @@ public class PostgresTaskRepository implements TaskRepository, AutoCloseable {
              PreparedStatement stmt = conn.prepareStatement(selectSql);
              ResultSet resultSet = stmt.executeQuery()) {
             while (resultSet.next()) {
-                tasks.add(new Task(
-                        resultSet.getString("id"),
-                        resultSet.getString("title"),
-                        resultSet.getBoolean("completed"),
-                        resultSet.getTimestamp("created_at").toInstant()));
+                tasks.add(mapRow(resultSet));
             }
         } catch (SQLException e) {
             throw new RuntimeException("Falha ao buscar tasks no Postgres", e);
         }
 
         return tasks;
+    }
+
+    
+    private Task mapRow(ResultSet rs) throws SQLException {
+        return new Task(
+                rs.getString("id"),
+                rs.getString("title"),
+                rs.getBoolean("completed"),
+                rs.getTimestamp("created_at").toInstant()
+        );
     }
     
     @Override
@@ -115,17 +122,12 @@ public class PostgresTaskRepository implements TaskRepository, AutoCloseable {
             }
             try (ResultSet resultSet = stmt.executeQuery()) {
                 while (resultSet.next()) {
-                    tasks.add(new Task(
-                            resultSet.getString("id"),
-                            resultSet.getString("title"),
-                            resultSet.getBoolean("completed"),
-                            resultSet.getTimestamp("created_at").toInstant()));
+                    tasks.add(mapRow(resultSet));
                 }
             }
         } catch (SQLException e) {
             throw new RuntimeException("Falha ao buscar tasks no Postgres", e);
         }
-
         return tasks;
     }
 
@@ -137,11 +139,7 @@ public class PostgresTaskRepository implements TaskRepository, AutoCloseable {
             stmt.setString(1, id);
             try (ResultSet resultSet = stmt.executeQuery()) {
                 if (resultSet.next()) {
-                    return Optional.of(new Task(
-                            resultSet.getString("id"),
-                            resultSet.getString("title"),
-                            resultSet.getBoolean("completed"),
-                            resultSet.getTimestamp("created_at").toInstant()));
+                    return Optional.of(mapRow(resultSet));
                 }
             }
         } catch (SQLException e) {
@@ -160,26 +158,61 @@ public class PostgresTaskRepository implements TaskRepository, AutoCloseable {
 
     @Override
     public Task save(Task task) {
-        batchQueue.add(task);
-        if (batchQueue.size() >= 100) {
-            triggerFlush();
+        String sql = "INSERT INTO tasks (id, title, completed, created_at) VALUES (?, ?, ?, ?)";
+        try (Connection conn = this.dataSource.getConnection();
+                PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setString(1, task.getId());
+            stmt.setString(2, task.getTitle());
+            stmt.setBoolean(3, task.isCompleted());
+            stmt.setTimestamp(4, java.sql.Timestamp.from(task.getCreatedAt()));
+            stmt.executeUpdate();
+
+            batchQueue.add(task);
+            if (batchQueue.size() >= 100) {
+                triggerFlush();
+            }
+            return task;
+        } catch (SQLException e) {
+            throw new RuntimeException("Falha ao salvar task no Postgres", e);
         }
-        return task;
     }
 
     @Override
     public Optional<Task> update(String id, UnaryOperator<Task> updateFunction) {
-        throw new UnsupportedOperationException("Unimplemented method 'update'");
-    }
-
-    @Override
-    public boolean deleteById(String id) {
-        throw new UnsupportedOperationException("Unimplemented method 'deleteById'");
+        return findById(id)
+                .map(updateFunction)
+                .filter(updated -> executeUpdate(
+                        "UPDATE tasks SET title = ?, completed = ? WHERE id = ?",
+                        updated.getTitle(), updated.isCompleted(), updated.getId()) > 0);
     }
 
     @Override
     public boolean existsById(String id) {
-        throw new UnsupportedOperationException("Unimplemented method 'existsById'");
+        String sql = "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?) AS exists";
+        try (Connection conn = this.dataSource.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setString(1, id);
+            try (ResultSet resultSet = stmt.executeQuery()) {
+                if (resultSet.next()) {
+                    return resultSet.getBoolean("exists");
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Falha ao verificar existência de task por ID no Postgres", e);
+        }
+        return false;
+    }
+
+    @Override
+    public boolean deleteById(String id) {
+        String sql = "DELETE FROM tasks WHERE id = ?";
+        try (Connection conn = this.dataSource.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setString(1, id);
+            return stmt.executeUpdate() > 0;
+        } catch (SQLException e) {
+            throw new RuntimeException("Falha ao deletar task por ID no Postgres", e);
+        }
     }
 
     @Override
@@ -190,21 +223,33 @@ public class PostgresTaskRepository implements TaskRepository, AutoCloseable {
 
 
     private void initTable() {
-    String sql = """
-        CREATE TABLE IF NOT EXISTS tasks (
-            id VARCHAR(36) PRIMARY KEY,
-            title VARCHAR(255) NOT NULL,
-            completed BOOLEAN NOT NULL DEFAULT FALSE,
-            created_at TIMESTAMP WITH TIME ZONE NOT NULL
-        )
-        """;
-    try (Connection conn = this.dataSource.getConnection();
-         PreparedStatement stmt = conn.prepareStatement(sql)) {
-        stmt.execute();
-    } catch (SQLException e) {
-        throw new RuntimeException("Falha ao inicializar tabela tasks no Postgres", e);
+        String sql = """
+            CREATE TABLE IF NOT EXISTS tasks (
+                id VARCHAR(36) PRIMARY KEY,
+                title VARCHAR(255) NOT NULL,
+                completed BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMP WITH TIME ZONE NOT NULL
+            )
+            """;
+        try (Connection conn = this.dataSource.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.execute();
+        } catch (SQLException e) {
+            throw new RuntimeException("Falha ao inicializar tabela tasks no Postgres", e);
+        }
     }
 
 
-}
+    private int executeUpdate(String sql, Object... params) {
+        try (Connection conn = this.dataSource.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+                
+            for (int i = 0; i < params.length; i++) {
+                stmt.setObject(i + 1, params[i]);
+            }
+            return stmt.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("Falha ao executar atualização no Postgres", e);
+        }
+    }
 }
