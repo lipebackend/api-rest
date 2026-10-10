@@ -1,255 +1,204 @@
 package com.taskmanagement.api.infra.repository;
 
+import com.taskmanagement.api.domain.contract.repository.TaskRepository;
+import com.taskmanagement.api.domain.model.Task;
+
+import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 import java.util.function.UnaryOperator;
 
-import javax.sql.DataSource;
-
-import com.taskmanagement.api.domain.contract.repository.TaskRepository;
-import com.taskmanagement.api.domain.model.Task;
-
+/**
+ * Implementação JDBC síncrona e ACID de {@link TaskRepository} para PostgreSQL.
+ *
+ * <p>Decisões técnicas:
+ * <ul>
+ *   <li>Sem DDL em runtime: a criação de tabelas fica a cargo do Flyway no startup.</li>
+ *   <li>Escrita síncrona no {@link #save(Task)}: garante durabilidade (D do ACID) e Read-Your-Own-Writes.</li>
+ *   <li>{@link OffsetDateTime} em UTC para colunas {@code TIMESTAMPTZ}, evitando desvios de fuso horário da JVM.</li>
+ *   <li>Lock pessimista de linha ({@code SELECT ... FOR UPDATE}) em {@link #update} dentro da mesma transação
+ *       para impedir lost updates sob concorrência (Virtual Threads / múltiplas réplicas).</li>
+ * </ul>
+ */
 public class PostgresTaskRepository implements TaskRepository, AutoCloseable {
-    private final BlockingQueue<Task> batchQueue = new LinkedBlockingQueue<>();
-    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+
+    private static final int DEFAULT_FIND_ALL_LIMIT = 100;
+
     private final DataSource dataSource;
 
     public PostgresTaskRepository(DataSource dataSource) {
-        this.dataSource = dataSource;
-        this.scheduler.scheduleAtFixedRate(this::triggerFlush, 30, 30, TimeUnit.SECONDS);
+        this.dataSource = Objects.requireNonNull(dataSource, "dataSource cannot be null");
     }
 
-    private void flushBatch(List<Task> batch) {
-    String sql = "INSERT INTO tasks (id, title, completed, created_at) VALUES (?, ?, ?, ?)";
-    
-    try (Connection conn = this.dataSource.getConnection();
-         PreparedStatement stmt = conn.prepareStatement(sql)) {
-        
-        for (Task task : batch) {
-            stmt.setString(1, task.getId());
-            stmt.setString(2, task.getTitle());
-            stmt.setBoolean(3, task.isCompleted());
-            stmt.setTimestamp(4, java.sql.Timestamp.from(task.getCreatedAt()));
-            stmt.addBatch();
-        }
-        
-        stmt.executeBatch();
-    } catch (SQLException e) {
-        throw new RuntimeException("Falha ao processar lote de tasks no Postgres", e);
-    }
-}
-
-    public List<Task> findAll() {
-        String createTableSql = """
-                CREATE TABLE IF NOT EXISTS tasks (
-                    id VARCHAR(36) PRIMARY KEY,
-                    title TEXT NOT NULL,
-                    completed BOOLEAN NOT NULL,
-                    created_at TIMESTAMP NOT NULL
-                );
-                """;
-        String selectSql = "SELECT id, title, completed, created_at FROM tasks";
-        List<Task> tasks = new ArrayList<>();
-
-        try (Connection conn = this.dataSource.getConnection();
-             PreparedStatement createStmt = conn.prepareStatement(createTableSql)) {
-            createStmt.execute();
-        } catch (SQLException e) {
-            throw new RuntimeException("Falha ao criar tabela tasks no Postgres", e);
-        }
-
-        try (Connection conn = this.dataSource.getConnection();
-             PreparedStatement stmt = conn.prepareStatement(selectSql);
-             ResultSet resultSet = stmt.executeQuery()) {
-            while (resultSet.next()) {
-                tasks.add(mapRow(resultSet));
-            }
-        } catch (SQLException e) {
-            throw new RuntimeException("Falha ao buscar tasks no Postgres", e);
-        }
-
-        return tasks;
-    }
-
-    
-    private Task mapRow(ResultSet rs) throws SQLException {
-        return new Task(
-                rs.getString("id"),
-                rs.getString("title"),
-                rs.getBoolean("completed"),
-                rs.getTimestamp("created_at").toInstant()
-        );
-    }
-    
     @Override
     public List<Task> findAll(Boolean completedFilter) {
-        String createTableSql = """
-                CREATE TABLE IF NOT EXISTS tasks (
-                    id VARCHAR(36) PRIMARY KEY,
-                    title TEXT NOT NULL,
-                    completed BOOLEAN NOT NULL,
-                    created_at TIMESTAMP NOT NULL
-                );
-                """;
-        String selectSql = "SELECT id, title, completed, created_at FROM tasks";
-        List<Task> tasks = new ArrayList<>();
-
-        try (Connection conn = this.dataSource.getConnection();
-             PreparedStatement createStmt = conn.prepareStatement(createTableSql)) {
-            createStmt.execute();
-        } catch (SQLException e) {
-            throw new RuntimeException("Falha ao criar tabela tasks no Postgres", e);
-        }
-
+        StringBuilder sql = new StringBuilder(
+                "SELECT id, title, completed, created_at FROM tasks");
         if (completedFilter != null) {
-            selectSql += " WHERE completed = ?";
+            sql.append(" WHERE completed = ?");
         }
+        sql.append(" ORDER BY created_at ASC LIMIT ?");
 
-        try (Connection conn = this.dataSource.getConnection();
-             PreparedStatement stmt = conn.prepareStatement(selectSql)) {
+        List<Task> tasks = new ArrayList<>();
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement stmt = conn.prepareStatement(sql.toString())) {
+            int paramIndex = 1;
             if (completedFilter != null) {
-                stmt.setBoolean(1, completedFilter);
+                stmt.setBoolean(paramIndex++, completedFilter);
             }
-            try (ResultSet resultSet = stmt.executeQuery()) {
-                while (resultSet.next()) {
-                    tasks.add(mapRow(resultSet));
+            stmt.setInt(paramIndex, DEFAULT_FIND_ALL_LIMIT);
+
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    tasks.add(mapRow(rs));
                 }
             }
+            return tasks;
         } catch (SQLException e) {
-            throw new RuntimeException("Falha ao buscar tasks no Postgres", e);
+            throw new RepositoryException("Falha ao listar tasks no PostgreSQL", e);
         }
-        return tasks;
     }
 
     @Override
     public Optional<Task> findById(String id) {
         String sql = "SELECT id, title, completed, created_at FROM tasks WHERE id = ?";
-        try (Connection conn = this.dataSource.getConnection();
-             PreparedStatement stmt = conn.prepareStatement(sql)) {
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement stmt = conn.prepareStatement(sql)) {
             stmt.setString(1, id);
-            try (ResultSet resultSet = stmt.executeQuery()) {
-                if (resultSet.next()) {
-                    return Optional.of(mapRow(resultSet));
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    return Optional.of(mapRow(rs));
                 }
             }
+            return Optional.empty();
         } catch (SQLException e) {
-            throw new RuntimeException("Falha ao buscar task por ID no Postgres", e);
-        }
-        return Optional.empty();
-    }
-
-    private void triggerFlush() {
-        List<Task> batch = new ArrayList<>(100);
-        batchQueue.drainTo(batch, 100);
-        if (!batch.isEmpty()) {
-            flushBatch(batch);
+            throw new RepositoryException("Falha ao buscar task por ID no PostgreSQL", e);
         }
     }
 
     @Override
     public Task save(Task task) {
+        Objects.requireNonNull(task, "task cannot be null");
         String sql = "INSERT INTO tasks (id, title, completed, created_at) VALUES (?, ?, ?, ?)";
-        try (Connection conn = this.dataSource.getConnection();
+        try (Connection conn = dataSource.getConnection();
                 PreparedStatement stmt = conn.prepareStatement(sql)) {
             stmt.setString(1, task.getId());
             stmt.setString(2, task.getTitle());
             stmt.setBoolean(3, task.isCompleted());
-            stmt.setTimestamp(4, java.sql.Timestamp.from(task.getCreatedAt()));
+            stmt.setObject(4, task.getCreatedAt().atOffset(ZoneOffset.UTC));
             stmt.executeUpdate();
-
-            batchQueue.add(task);
-            if (batchQueue.size() >= 100) {
-                triggerFlush();
-            }
             return task;
         } catch (SQLException e) {
-            throw new RuntimeException("Falha ao salvar task no Postgres", e);
+            throw new RepositoryException("Falha ao salvar task no PostgreSQL", e);
         }
     }
 
     @Override
     public Optional<Task> update(String id, UnaryOperator<Task> updateFunction) {
-        return findById(id)
-                .map(updateFunction)
-                .filter(updated -> executeUpdate(
-                        "UPDATE tasks SET title = ?, completed = ? WHERE id = ?",
-                        updated.getTitle(), updated.isCompleted(), updated.getId()) > 0);
-    }
+        Objects.requireNonNull(id, "id cannot be null");
+        Objects.requireNonNull(updateFunction, "updateFunction cannot be null");
 
-    @Override
-    public boolean existsById(String id) {
-        String sql = "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?) AS exists";
-        try (Connection conn = this.dataSource.getConnection();
-             PreparedStatement stmt = conn.prepareStatement(sql)) {
-            stmt.setString(1, id);
-            try (ResultSet resultSet = stmt.executeQuery()) {
-                if (resultSet.next()) {
-                    return resultSet.getBoolean("exists");
+        String selectForUpdateSql =
+                "SELECT id, title, completed, created_at FROM tasks WHERE id = ? FOR UPDATE";
+        String updateSql =
+                "UPDATE tasks SET title = ?, completed = ? WHERE id = ?";
+
+        try (Connection conn = dataSource.getConnection()) {
+            boolean previousAutoCommit = conn.getAutoCommit();
+            conn.setAutoCommit(false);
+            try {
+                Task current;
+                try (PreparedStatement selectStmt = conn.prepareStatement(selectForUpdateSql)) {
+                    selectStmt.setString(1, id);
+                    try (ResultSet rs = selectStmt.executeQuery()) {
+                        if (!rs.next()) {
+                            conn.rollback();
+                            return Optional.empty();
+                        }
+                        current = mapRow(rs);
+                    }
+                }
+
+                Task updated = Objects.requireNonNull(
+                        updateFunction.apply(current),
+                        "updateFunction cannot return null");
+
+                try (PreparedStatement updateStmt = conn.prepareStatement(updateSql)) {
+                    updateStmt.setString(1, updated.getTitle());
+                    updateStmt.setBoolean(2, updated.isCompleted());
+                    updateStmt.setString(3, updated.getId());
+                    updateStmt.executeUpdate();
+                }
+
+                conn.commit();
+                return Optional.of(updated);
+            } catch (Exception e) {
+                try {
+                    conn.rollback();
+                } catch (SQLException rollbackEx) {
+                    e.addSuppressed(rollbackEx);
+                }
+                if (e instanceof RuntimeException runtimeException && !(e instanceof SQLException)) {
+                    throw runtimeException;
+                }
+                throw new RepositoryException("Falha ao atualizar task de forma transacional no PostgreSQL", e);
+            } finally {
+                try {
+                    conn.setAutoCommit(previousAutoCommit);
+                } catch (SQLException ignored) {
                 }
             }
         } catch (SQLException e) {
-            throw new RuntimeException("Falha ao verificar existência de task por ID no Postgres", e);
+            throw new RepositoryException("Falha ao abrir transação para atualizar task no PostgreSQL", e);
         }
-        return false;
     }
 
     @Override
     public boolean deleteById(String id) {
         String sql = "DELETE FROM tasks WHERE id = ?";
-        try (Connection conn = this.dataSource.getConnection();
-             PreparedStatement stmt = conn.prepareStatement(sql)) {
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement stmt = conn.prepareStatement(sql)) {
             stmt.setString(1, id);
             return stmt.executeUpdate() > 0;
         } catch (SQLException e) {
-            throw new RuntimeException("Falha ao deletar task por ID no Postgres", e);
+            throw new RepositoryException("Falha ao remover task por ID no PostgreSQL", e);
         }
     }
 
     @Override
-    public void close() throws Exception {
-        triggerFlush();
-        scheduler.shutdown();
-    }
-
-
-    private void initTable() {
-        String sql = """
-            CREATE TABLE IF NOT EXISTS tasks (
-                id VARCHAR(36) PRIMARY KEY,
-                title VARCHAR(255) NOT NULL,
-                completed BOOLEAN NOT NULL DEFAULT FALSE,
-                created_at TIMESTAMP WITH TIME ZONE NOT NULL
-            )
-            """;
-        try (Connection conn = this.dataSource.getConnection();
-             PreparedStatement stmt = conn.prepareStatement(sql)) {
-            stmt.execute();
-        } catch (SQLException e) {
-            throw new RuntimeException("Falha ao inicializar tabela tasks no Postgres", e);
-        }
-    }
-
-
-    private int executeUpdate(String sql, Object... params) {
-        try (Connection conn = this.dataSource.getConnection();
-             PreparedStatement stmt = conn.prepareStatement(sql)) {
-                
-            for (int i = 0; i < params.length; i++) {
-                stmt.setObject(i + 1, params[i]);
+    public boolean existsById(String id) {
+        String sql = "SELECT 1 FROM tasks WHERE id = ?";
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setString(1, id);
+            try (ResultSet rs = stmt.executeQuery()) {
+                return rs.next();
             }
-            return stmt.executeUpdate();
         } catch (SQLException e) {
-            throw new RuntimeException("Falha ao executar atualização no Postgres", e);
+            throw new RepositoryException("Falha ao verificar existência de task no PostgreSQL", e);
         }
+    }
+
+    private Task mapRow(ResultSet rs) throws SQLException {
+        OffsetDateTime createdAt = rs.getObject("created_at", OffsetDateTime.class);
+        return new Task(
+                rs.getString("id"),
+                rs.getString("title"),
+                rs.getBoolean("completed"),
+                createdAt.toInstant()
+        );
+    }
+
+    @Override
+    public void close() {
+        // O ciclo de vida do DataSource (HikariCP) é gerenciado pelo composição (Main / DatabaseConfig).
     }
 }

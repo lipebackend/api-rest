@@ -1,33 +1,50 @@
 package com.taskmanagement.api.infra.db;
 
-import javax.sql.DataSource;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import org.flywaydb.core.Flyway;
 
-public class DatabaseConfig {
-    private static HikariDataSource dataSource;
+import javax.sql.DataSource;
 
-    private DatabaseConfig() {}
-    
-    public static DataSource getDataSource(String url, String username, String password) {
-        if (dataSource == null) {
-            HikariConfig config = new HikariConfig();
+/**
+ * Configuração do pool de conexões JDBC (HikariCP) e execução de migrações Flyway.
+ */
+public final class DatabaseConfig {
 
-            config.setJdbcUrl(url);
-            config.setUsername(username);
-            config.setPassword(password);
-            config.setMaximumPoolSize(10);
-            config.setConnectionTimeout(3000);
+    private static volatile HikariDataSource dataSource;
 
-            dataSource = new HikariDataSource(config);
+    private DatabaseConfig() {
+    }
+
+    public static synchronized DataSource getDataSource(String url, String username, String password) {
+        if (dataSource == null || dataSource.isClosed()) {
+            dataSource = createDataSource(url, username, password);
         }
-        
         return dataSource;
     }
 
-    public static void close() {
-        if (dataSource != null) {
+    public static HikariDataSource createDataSource(String url, String username, String password) {
+        HikariConfig config = new HikariConfig();
+        config.setJdbcUrl(url);
+        config.setUsername(username);
+        config.setPassword(password);
+        config.setMaximumPoolSize(10);
+        config.setConnectionTimeout(3000);
+        return new HikariDataSource(config);
+    }
+
+    public static void runMigrations(DataSource targetDataSource) {
+        Flyway.configure()
+                .dataSource(targetDataSource)
+                .locations("classpath:db/migration")
+                .load()
+                .migrate();
+    }
+
+    public static synchronized void close() {
+        if (dataSource != null && !dataSource.isClosed()) {
             dataSource.close();
+            dataSource = null;
         }
     }
 }
