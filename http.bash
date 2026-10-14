@@ -21,48 +21,110 @@ MODE="all" # "functional", "stress", "all"
 FORCE_NATIVE_BASH=false
 TOTAL_REQUESTS="${REQUESTS:-10000}"
 CONCURRENCY="${CONCURRENCY:-100}"
+USER_SET_MODE=false
 
-# Processamento de argumentos
-for arg in "$@"; do
-    case "${arg}" in
+# Processamento flexível de argumentos (suporta -n 1000, -n=1000, posicionais 1000 50, etc.)
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         http://*|https://*)
-            BASE_URL="${arg}"
+            BASE_URL="$1"
+            shift
+            ;;
+        -u|--url)
+            BASE_URL="$2"
+            shift 2
+            ;;
+        --url=*)
+            BASE_URL="${1#*=}"
+            shift
             ;;
         --stress|stress)
             MODE="stress"
+            USER_SET_MODE=true
+            shift
             ;;
         --functional|functional)
             MODE="functional"
+            USER_SET_MODE=true
+            shift
             ;;
         --all|all)
             MODE="all"
+            USER_SET_MODE=true
+            shift
             ;;
         --native)
             FORCE_NATIVE_BASH=true
+            shift
+            ;;
+        -n|--requests)
+            TOTAL_REQUESTS="$2"
+            if [ "${USER_SET_MODE}" = false ]; then
+                MODE="stress"
+            fi
+            shift 2
             ;;
         -n=*|--requests=*)
-            TOTAL_REQUESTS="${arg#*=}"
+            TOTAL_REQUESTS="${1#*=}"
+            if [ "${USER_SET_MODE}" = false ]; then
+                MODE="stress"
+            fi
+            shift
+            ;;
+        -c|--concurrency)
+            CONCURRENCY="$2"
+            if [ "${USER_SET_MODE}" = false ]; then
+                MODE="stress"
+            fi
+            shift 2
             ;;
         -c=*|--concurrency=*)
-            CONCURRENCY="${arg#*=}"
+            CONCURRENCY="${1#*=}"
+            if [ "${USER_SET_MODE}" = false ]; then
+                MODE="stress"
+            fi
+            shift
+            ;;
+        [0-9]*)
+            # Suporte a argumentos numéricos posicionais (ex: ./http.bash 5000 50)
+            if [ "${TOTAL_REQUESTS}" = "10000" ] && [ -z "${FIRST_NUM_SET:-}" ]; then
+                TOTAL_REQUESTS="$1"
+                FIRST_NUM_SET=true
+                if [ "${USER_SET_MODE}" = false ]; then
+                    MODE="stress"
+                fi
+            else
+                CONCURRENCY="$1"
+            fi
+            shift
             ;;
         --help|-h)
-            echo "Uso: $0 [BASE_URL] [OPÇÕES]"
+            echo -e "${BOLD}Uso:${NC} $0 [BASE_URL] [OPÇÕES]"
             echo ""
-            echo "Opções:"
-            echo "  --stress            Executa apenas o teste de estresse de alta concorrência"
-            echo "  --functional        Executa apenas a suíte funcional de 15 passos"
-            echo "  --all               Executa a suíte funcional seguida do teste de estresse (padrão)"
-            echo "  --native            Força uso do motor nativo Bash (xargs -P + curl) em vez de ferramentas Go"
-            echo "  -n=N, --requests=N  Número total de requisições no estresse (padrão: 10000)"
-            echo "  -c=C, --concurrency=C Concorrência simultânea (padrão: 100)"
+            echo -e "${BOLD}Opções Gerais:${NC}"
+            echo "  --functional, functional    Executa a suíte de testes funcionais (15 passos)"
+            echo "  --stress, stress            Executa o teste de estresse de alta concorrência"
+            echo "  --all, all                  Executa suíte funcional + teste de estresse (padrão)"
+            echo "  -u, --url <URL>             URL base do endpoint (padrão: http://localhost:8080/tasks)"
             echo ""
-            echo "Exemplos:"
-            echo "  $0"
-            echo "  $0 http://localhost:8080/tasks --stress"
-            echo "  $0 --stress -n=10000 -c=200"
-            echo "  $0 --stress --native"
+            echo -e "${BOLD}Opções de Estresse / Carga:${NC}"
+            echo "  -n, --requests <N>          Total de requisições (padrão: 10000)"
+            echo "  -c, --concurrency <C>       Número de requisições simultâneas/concorrência (padrão: 100)"
+            echo "  --native                    Força motor nativo Bash (xargs -P + curl) em vez de ferramenta Go (hey)"
+            echo ""
+            echo -e "${BOLD}Exemplos:${NC}"
+            echo "  $0                                        # Roda tudo com padrão (funcional + estresse 10k/100)"
+            echo "  $0 --functional                           # Apenas testes funcionais"
+            echo "  $0 -n 500 -c 50                           # Dispara 500 requisições com 50 conexões simultâneas"
+            echo "  $0 2000 100                               # Atalho posicional: 2000 requisições, concorrência 100"
+            echo "  $0 --stress -n=50000 -c=200 --native      # 50k requisições com 200 de concorrência via xargs"
+            echo "  $0 http://localhost:8080/tasks -n 1000    # Alvo customizado com 1000 requisições"
             exit 0
+            ;;
+        *)
+            echo -e "${RED}Opção desconhecida: $1${NC}"
+            echo "Use $0 --help para ver as opções disponíveis."
+            exit 1
             ;;
     esac
 done
@@ -77,7 +139,7 @@ run_functional_tests() {
     echo -e "======================================================================${NC}\n"
 
     # 1. GET (Listar todas as tarefas - lista vazia inicial)
-    echo -e "${YELLOW}=== 1. GET /tasks (Listar todas - esperado []) ===${NC}"
+    echo -e "${YELLOW}=== 1. GET /tasks (Listar todas) ===${NC}"
     curl -s -i -X GET "${BASE_URL}"
     echo -e "\n"
 
@@ -103,7 +165,7 @@ run_functional_tests() {
         -d '{"title": "Implementar Clean Architecture no Backend"}'
     echo -e "\n"
 
-    # 4. GET (Listar todas as tarefas - agora com 2 tarefas)
+    # 4. GET (Listar todas as tarefas)
     echo -e "${YELLOW}=== 4. GET /tasks (Listar todas novamente) ===${NC}"
     curl -s -i -X GET "${BASE_URL}"
     echo -e "\n"
@@ -177,7 +239,7 @@ run_functional_tests() {
 }
 
 # ==============================================================================
-# 2. TESTE DE ESTRESSE: 10.000 REQUISIÇÕES EM PARALELO
+# 2. TESTE DE ESTRESSE: ALTA CONCORRÊNCIA
 # ==============================================================================
 run_stress_test() {
     echo -e "${CYAN}======================================================================"
@@ -187,16 +249,16 @@ run_stress_test() {
     echo -e "======================================================================${NC}\n"
 
     local HEY_BIN
-    HEY_BIN=$(command -v hey || echo "/home/wroc/go/bin/hey")
+    HEY_BIN=$(command -v hey 2>/dev/null || echo "")
 
-    if [ "${FORCE_NATIVE_BASH}" = false ] && [ -x "${HEY_BIN}" ]; then
+    if [ "${FORCE_NATIVE_BASH}" = false ] && [ -n "${HEY_BIN}" ] && [ -x "${HEY_BIN}" ]; then
         echo -e "${BLUE}▶ Motor: 'hey' (Conexões HTTP Keep-Alive & Medição Percentil)${NC}"
         echo -e "${YELLOW}Disparando ${TOTAL_REQUESTS} requisições GET com concorrência de ${CONCURRENCY}...${NC}\n"
         "${HEY_BIN}" -n "${TOTAL_REQUESTS}" -c "${CONCURRENCY}" "${BASE_URL}"
     else
         echo -e "${BLUE}▶ Motor: Bash Nativo (xargs -P ${CONCURRENCY} + curl)${NC}"
-        echo -e "${YELLOW}Iniciando disparo paralelo de ${TOTAL_REQUESTS} requisições no kernel Linux...${NC}"
-        
+        echo -e "${YELLOW}Iniciando disparo paralelo de ${TOTAL_REQUESTS} requisições com ${CONCURRENCY} workers...${NC}"
+
         local start_ts
         start_ts=$(date +%s%N 2>/dev/null || date +%s)
 
@@ -210,7 +272,6 @@ run_stress_test() {
         # Cálculo do tempo decorrido
         local elapsed_sec
         if [ ${#start_ts} -gt 10 ]; then
-            # Nanosegundos disponíveis
             local diff_ns=$((end_ts - start_ts))
             elapsed_sec=$(awk "BEGIN {printf \"%.3f\", ${diff_ns} / 1000000000}")
         else
@@ -259,5 +320,5 @@ case "${MODE}" in
 esac
 
 echo -e "${CYAN}======================================================================"
-echo -e "       TESTES CONCLUÍDOS COM SUCESSO!"
+echo -e "       EXECUÇÃO FINALIZADA!"
 echo -e "======================================================================${NC}"
