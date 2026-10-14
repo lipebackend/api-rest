@@ -1,5 +1,7 @@
 package com.taskmanagement.api.infra.queue;
 
+import com.taskmanagement.api.infra.config.Config;
+
 /**
  * Configuração de conexão com o broker RabbitMQ (camada de infraestrutura).
  */
@@ -9,6 +11,12 @@ public record RabbitConfig(
         String username,
         String password,
         int connectionTimeoutMs) {
+
+    private static final String DEFAULT_HOST = "localhost";
+    private static final int DEFAULT_PORT = 5672;
+    private static final String DEFAULT_USER = "guest";
+    private static final String DEFAULT_PASSWORD = "guest";
+    private static final int DEFAULT_TIMEOUT_MS = 5000;
 
     public RabbitConfig {
         if (host == null || host.isBlank()) {
@@ -29,15 +37,10 @@ public record RabbitConfig(
     }
 
     public static RabbitConfig fromEnv() {
-        String host = envOrDefault("RABBITMQ_HOST", "localhost");
-        int port = Integer.parseInt(envOrDefault("RABBITMQ_PORT", "5672"));
-        String user = envOrDefault("RABBITMQ_USER", "guest");
-        String pass = envOrDefault("RABBITMQ_PASSWORD", "guest");
-        return new RabbitConfig(host, port, user, pass, 5000);
-    }
-
-    private static String envOrDefault(String key, String defaultValue) {
-        String val = System.getenv(key);
-        return (val != null && !val.isBlank()) ? val.trim() : defaultValue;
+        String host = Config.get("RABBITMQ_HOST", DEFAULT_HOST);
+        int port = Config.getInt("RABBITMQ_PORT", DEFAULT_PORT);
+        String user = Config.get("RABBITMQ_USER", DEFAULT_USER);
+        String pass = Config.get("RABBITMQ_PASSWORD", DEFAULT_PASSWORD);
+        return new RabbitConfig(host, port, user, pass, DEFAULT_TIMEOUT_MS);
     }
 }
