@@ -16,8 +16,6 @@ public class Server implements AutoCloseable {
     private static final Logger LOGGER = Logger.getLogger(Server.class.getName());
     private static final int DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 5;
 
-    private final String host;
-    private final int port;
     private final HttpServer httpServer;
     private final ExecutorService executor;
     private final AtomicBoolean isRunning = new AtomicBoolean(false);
@@ -26,8 +24,6 @@ public class Server implements AutoCloseable {
         validatePort(port);
         validateHost(host);
 
-        this.host = host;
-        this.port = port;
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
         this.httpServer = HttpServer.create(new InetSocketAddress(host, port), 0);
         this.httpServer.setExecutor(this.executor);
@@ -49,7 +45,7 @@ public class Server implements AutoCloseable {
         if (isRunning.compareAndSet(false, true)) {
             httpServer.start();
             int actualPort = getPort();
-            LOGGER.log(Level.INFO, "Servidor iniciado em {0}:{1,number,#}", new Object[] { host, actualPort });
+            LOGGER.log(Level.INFO, "Servidor iniciado em {0}:{1,number,#}", new Object[] { getHost(), actualPort });
         } else {
             LOGGER.log(Level.WARNING, "Tentativa de iniciar servidor já em execução.");
         }
@@ -91,7 +87,7 @@ public class Server implements AutoCloseable {
     }
 
     public String getHost() {
-        return host;
+        return httpServer.getAddress().getHostString();
     }
 
     public int getPort() {
