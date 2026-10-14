@@ -33,6 +33,12 @@ services:
 
   rabbitmq:
     image: docker.io/library/rabbitmq:3-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+      RABBITMQ_ERLANG_COOKIE: "task_management_rabbit_cookie"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
     ports:
       - "5672:5672"     # Porta do protocolo AMQP (para a aplicação Java)
       - "15672:15672"   # Painel Web do RabbitMQ (user: guest / pass: guest)
@@ -77,6 +83,7 @@ services:
 volumes:
   redis_data:
   postgres_data:
+  rabbitmq_data:
 
 networks:
   task-network:
