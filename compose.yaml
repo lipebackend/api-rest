@@ -1,16 +1,20 @@
 services:
   redis:
     image: docker.io/library/redis:7-alpine
-    container_name: redis
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     networks:
       - task-network
+
   postgres:
     image: docker.io/library/postgres:15-alpine
-    container_name: postgres
     environment:
       POSTGRES_USER: task_user
       POSTGRES_PASSWORD: task_password
@@ -19,19 +23,35 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U task_user -d task_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     networks:
       - task-network
+
   rabbitmq:
     image: docker.io/library/rabbitmq:3-management-alpine
-    container_name: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+      RABBITMQ_ERLANG_COOKIE: "task_management_rabbit_cookie"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
     ports:
       - "5672:5672"     # Porta do protocolo AMQP (para a aplicação Java)
       - "15672:15672"   # Painel Web do RabbitMQ (user: guest / pass: guest)
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - task-network
 
   api:
-    image: task-management-api
+    image: task-management-api:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -40,18 +60,30 @@ services:
     environment:
       HOST: "0.0.0.0"
       PORT: 8080
+      STORAGE: "postgres"
+      CACHE_ENABLED: "true"
+      QUEUE_ENABLED: "true"
+      DATABASE_URL: "jdbc:postgresql://postgres:5432/task_db"
+      DATABASE_USER: "task_user"
+      DATABASE_PASSWORD: "task_password"
       REDIS_HOST: redis
       REDIS_PORT: 6379
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: 5672
     depends_on:
-      - redis
-      - rabbitmq
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     networks:
       - task-network
 
 volumes:
   redis_data:
+  postgres_data:
+  rabbitmq_data:
 
 networks:
   task-network:

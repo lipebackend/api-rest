@@ -40,3 +40,6 @@ dependency-reduced-pom.xml
 ### Editors & Workspaces ###
 *.sublime-workspace
 *.sublime-project
+
+### Environment Files ###
+.env

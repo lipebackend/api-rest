@@ -8,6 +8,7 @@ import com.taskmanagement.api.domain.contract.services.TaskService;
 import com.taskmanagement.api.domain.exception.TaskNotFoundException;
 import com.taskmanagement.api.domain.exception.ValidationException;
 import com.taskmanagement.api.domain.model.Task;
+import com.taskmanagement.api.infra.repository.RepositoryException;
 import com.taskmanagement.api.infra.web.dto.CreateTaskRequest;
 import com.taskmanagement.api.infra.web.dto.ErrorResponse;
 import com.taskmanagement.api.infra.web.dto.PatchTaskRequest;
@@ -21,6 +22,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Objects;
@@ -45,11 +47,11 @@ public class TaskHandler implements HttpHandler {
     public void handle(HttpExchange exchange) throws IOException {
         try {
             String method = exchange.getRequestMethod().toUpperCase();
-            String path = exchange.getRequestURI().getPath();
-            String normalizedPath = path.replaceAll("^/+", "").replaceAll("/+$", "");
+            String rawPath = exchange.getRequestURI().getRawPath();
+            String normalizedPath = trimSlashes(rawPath != null ? rawPath : exchange.getRequestURI().getPath());
             String[] segments = normalizedPath.isEmpty() ? new String[0] : normalizedPath.split("/");
 
-            LOGGER.log(Level.INFO, "Incoming request: {0} {1}", new Object[] { method, path });
+            LOGGER.log(Level.INFO, "Incoming request: {0} {1}", new Object[] { method, rawPath });
             if (segments.length == 0 || !segments[0].equals("tasks")) {
                 sendError(exchange, 404, "Endpoint not found");
                 return;
@@ -65,7 +67,7 @@ public class TaskHandler implements HttpHandler {
                     }
                 }
             } else if (segments.length == 2) {
-                String taskId = segments[1];
+                String taskId = decodeUrlComponent(segments[1]);
                 switch (method) {
                     case "GET" -> handleGetById(exchange, taskId);
                     case "PUT" -> handleUpdate(exchange, taskId);
@@ -81,12 +83,13 @@ public class TaskHandler implements HttpHandler {
             }
         } catch (GenericException e) {
             sendError(exchange, e.getStatusCode(), e.getMessage());
-        } catch (JsonProcessingException e) {
-            sendError(exchange, 400, "Invalid JSON: " + e.getOriginalMessage());
         } catch (ValidationException e) {
             sendError(exchange, 400, "Validation error: " + e.getMessage());
         } catch (TaskNotFoundException e) {
-            sendError(exchange, 404, "Task not found:");
+            sendError(exchange, 404, e.getMessage());
+        } catch (RepositoryException e) {
+            LOGGER.log(Level.SEVERE, "Database unavailable while handling request", e);
+            sendError(exchange, 503, "Service temporarily unavailable");
         } catch (Exception e) {
             LOGGER.log(Level.SEVERE, "Unexpected error while handling request", e);
             sendError(exchange, 500, "Internal server error");
@@ -119,12 +122,13 @@ public class TaskHandler implements HttpHandler {
         validateContentType(exchange);
         String body = readRequestBody(exchange);
 
-        CreateTaskRequest request = objectMapper.readValue(body, CreateTaskRequest.class);
+        CreateTaskRequest request = parseRequestBody(body, CreateTaskRequest.class);
         if (request == null || request.title() == null || request.title().isBlank()) {
             throw new ValidationException("Field 'title' is required and cannot be blank");
         }
 
         Task created = taskService.createTask(request.title());
+        exchange.getResponseHeaders().set("Location", "/tasks/" + created.getId());
         sendJsonResponse(exchange, 201, TaskResponse.from(created));
     }
 
@@ -133,7 +137,7 @@ public class TaskHandler implements HttpHandler {
         validateContentType(exchange);
         String body = readRequestBody(exchange);
 
-        UpdateTaskRequest request = objectMapper.readValue(body, UpdateTaskRequest.class);
+        UpdateTaskRequest request = parseRequestBody(body, UpdateTaskRequest.class);
         if (request == null) {
             throw new ValidationException("Request body cannot be empty");
         }
@@ -153,7 +157,7 @@ public class TaskHandler implements HttpHandler {
         validateContentType(exchange);
         String body = readRequestBody(exchange);
 
-        PatchTaskRequest request = objectMapper.readValue(body, PatchTaskRequest.class);
+        PatchTaskRequest request = parseRequestBody(body, PatchTaskRequest.class);
         if (request == null || (request.title() == null && request.completed() == null)) {
             throw new ValidationException("Request body must contain 'title' and/or 'completed'");
         }
@@ -169,6 +173,14 @@ public class TaskHandler implements HttpHandler {
         LOGGER.log(Level.INFO, "Handling DELETE /tasks/{id} request");
         taskService.deleteTask(taskId);
         sendNoContent(exchange);
+    }
+
+    private <T> T parseRequestBody(String body, Class<T> type) {
+        try {
+            return objectMapper.readValue(body, type);
+        } catch (JsonProcessingException e) {
+            throw new ValidationException("Invalid JSON: " + e.getOriginalMessage());
+        }
     }
 
     private void validateContentType(HttpExchange exchange) {
@@ -212,8 +224,7 @@ public class TaskHandler implements HttpHandler {
     }
 
     private void sendNoContent(HttpExchange exchange) throws IOException {
-        // RFC 9110: 204 No Content MUST NOT include representation data or Content-Type
-        // header
+        // RFC 9110: 204 No Content MUST NOT include representation data or Content-Type header
         exchange.sendResponseHeaders(204, -1);
         exchange.close();
     }
@@ -231,8 +242,9 @@ public class TaskHandler implements HttpHandler {
 
         for (String param : rawQuery.split("&")) {
             String[] pair = param.split("=", 2);
-            if (pair.length == 2 && "completed".equalsIgnoreCase(pair[0])) {
-                String value = pair[1].trim();
+            String key = decodeUrlComponent(pair[0]);
+            if (pair.length == 2 && "completed".equalsIgnoreCase(key)) {
+                String value = decodeUrlComponent(pair[1]).trim();
                 if ("true".equalsIgnoreCase(value)) {
                     return true;
                 }
@@ -244,5 +256,28 @@ public class TaskHandler implements HttpHandler {
         }
 
         return null;
+    }
+
+    private static String decodeUrlComponent(String raw) {
+        try {
+            return URLDecoder.decode(raw, StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            throw new ValidationException("Invalid URL encoding in request URI");
+        }
+    }
+
+    private static String trimSlashes(String path) {
+        if (path == null || path.isEmpty()) {
+            return "";
+        }
+        int start = 0;
+        int end = path.length();
+        while (start < end && path.charAt(start) == '/') {
+            start++;
+        }
+        while (end > start && path.charAt(end - 1) == '/') {
+            end--;
+        }
+        return path.substring(start, end);
     }
 }

@@ -9,6 +9,8 @@ import java.util.UUID;
  * Enforces identity, state validation invariants, and immutable transitions.
  */
 public final class Task {
+    public static final int MAX_TITLE_LENGTH = 200;
+
     private final String id;
     private final String title;
     private final boolean completed;
@@ -40,7 +42,12 @@ public final class Task {
         if (title == null || title.isBlank()) {
             throw new IllegalArgumentException("Title cannot be null or blank");
         }
-        return title.strip();
+        String normalized = title.strip();
+        if (normalized.length() > MAX_TITLE_LENGTH) {
+            throw new IllegalArgumentException(
+                    "Title cannot exceed " + MAX_TITLE_LENGTH + " characters");
+        }
+        return normalized;
     }
 
     public Task withTitle(String newTitle) {
@@ -94,9 +101,5 @@ public final class Task {
                 ", completed=" + completed +
                 ", createdAt=" + createdAt +
                 '}';
-    }
-
-    public String getDescription() {
-        throw new UnsupportedOperationException("Unimplemented method 'getDescription'");
     }
 }

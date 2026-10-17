@@ -40,6 +40,7 @@ class TaskHandlerIntegrationTest {
 
                 server = new Server("localhost", 0);
                 server.createContext("/tasks", handler);
+                server.createContext("/health", new com.taskmanagement.api.infra.web.http.handler.HealthHandler());
                 server.start();
 
                 int port = server.getPort();
@@ -370,6 +371,30 @@ class TaskHandlerIntegrationTest {
                 assertThat(res.headers().firstValue("Allow")).contains("GET, POST");
         }
 
+        @Test
+        @DisplayName("GET /health/live and /health/ready should return 200 UP")
+        void shouldReturn200ForHealthProbes() throws Exception {
+                String healthBase = baseUrl.replace("/tasks", "/health");
+
+                HttpRequest liveReq = HttpRequest.newBuilder()
+                                .uri(URI.create(healthBase + "/live"))
+                                .timeout(TIMEOUT)
+                                .GET()
+                                .build();
+                HttpResponse<String> liveRes = client.send(liveReq, HttpResponse.BodyHandlers.ofString());
+                assertThat(liveRes.statusCode()).isEqualTo(200);
+                assertThat(liveRes.body()).contains("\"status\":\"UP\"");
+
+                HttpRequest readyReq = HttpRequest.newBuilder()
+                                .uri(URI.create(healthBase + "/ready"))
+                                .timeout(TIMEOUT)
+                                .GET()
+                                .build();
+                HttpResponse<String> readyRes = client.send(readyReq, HttpResponse.BodyHandlers.ofString());
+                assertThat(readyRes.statusCode()).isEqualTo(200);
+                assertThat(readyRes.body()).contains("\"status\":\"UP\"");
+        }
+
         private String createTask(String title) throws Exception {
                 String json = "{\"title\": \"" + title + "\"}";
                 HttpRequest request = HttpRequest.newBuilder()
@@ -381,6 +406,8 @@ class TaskHandlerIntegrationTest {
                 HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
                 assertThat(response.statusCode()).isEqualTo(201);
                 JsonNode root = objectMapper.readTree(response.body());
-                return root.get("id").asText();
+                String id = root.get("id").asText();
+                assertThat(response.headers().firstValue("Location")).contains("/tasks/" + id);
+                return id;
         }
 }
